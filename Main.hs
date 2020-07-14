@@ -5,9 +5,8 @@ module Main where
 import           Text.ParserCombinators.Parsec
                                          hiding ( spaces )
 import           Control.Monad.Except
-import           System.IO                      ( hFlush
-                                                , stdout
-                                                )
+import           System.IO
+import System.Environment (getArgs)
 import           Data.IORef
 import           Data.Maybe                     ( isJust
                                                 , isNothing
@@ -21,6 +20,8 @@ data LispVal = Atom String
              | Boolean Bool
              | PreFunc ([LispVal] -> ThrowsError LispVal)
              | Func {params :: [String], vararg :: Maybe String, body :: [LispVal], closure :: Env}
+             | IOFunc ([LispVal] -> IOThrowsError LispVal)
+             | Port Handle
 
 data LispError = NumArgs Integer [LispVal]
                | TypeMismatch String LispVal
@@ -60,15 +61,19 @@ showLisp (Str     x     ) = "\"" ++ x ++ "\""
 showLisp (Boolean x     ) = if x then "#t" else "#f"
 showLisp (PreFunc _     ) = "<primitive>"
 showLisp Func{}           = "<function>"
+showLisp (IOFunc _)       = "<IO primitive>"
+showLisp (Port   _)       = "<IO port>"
 
 showError :: LispError -> String
-showError (UnboundVar message varname) = message ++ ": " ++ varname
-showError (BadSpecialForm message form) = message ++ ": " ++ show form
-showError (NotFunction message func ) = message ++ ": " ++ show func
-showError (NumArgs expected found ) = " Expected " ++ show expected ++ " args: found values " ++ unwordsList found
-showError (TypeMismatch expected found) = "Invalid type: expected " ++ expected ++ ", found " ++ show found
-showError (Parser parseErr) = " Parse error at " ++ show parseErr
-showError (Default err) = "Error: " ++ err
+showError (UnboundVar     message varname) = message ++ ": " ++ varname
+showError (BadSpecialForm message form   ) = message ++ ": " ++ show form
+showError (NotFunction    message func   ) = message ++ ": " ++ show func
+showError (NumArgs expected found) =
+    " Expected " ++ show expected ++ " args: found values " ++ unwordsList found
+showError (TypeMismatch expected found) =
+    "Invalid type: expected " ++ expected ++ ", found " ++ show found
+showError (Parser  parseErr) = " Parse error at " ++ show parseErr
+showError (Default err     ) = "Error: " ++ err
 
 unwordsList :: [LispVal] -> String
 unwordsList = unwords . map showLisp
@@ -78,18 +83,26 @@ trapError a = catchError a (return . show)
 
 extractValue :: ThrowsError a -> a
 extractValue (Right x) = x
-extractValue (Left _) = error "How does it even possible?"
+extractValue (Left  _) = error "How does it even possible?"
+
 {-
 IO part
 -}
 
 main :: IO ()
-main = flushStr "Scheme\n" >> runRepl
+main = do
+    args <- getArgs
+    if null args
+    then flushStr "Scheme\n" >> runRepl
+    else runOne args
 
-readExpr :: String -> ThrowsError LispVal
-readExpr x = case regularParse parseExpr x of
+readOrThrow :: Parser a -> String -> ThrowsError a
+readOrThrow parser input = case regularParse parser input of
     Left  err -> throwError $ Parser err
     Right val -> return val
+
+readExpr = readOrThrow parseExpr
+readExprList = readOrThrow $ endBy parseExpr spaces
 
 flushStr :: String -> IO ()
 flushStr s = putStr s >> hFlush stdout
@@ -113,6 +126,11 @@ runRepl =
     preBindings
         >>= until_ (\x -> x == "quit" || x == "#q") (readPrompt "> ")
         .   evalAndPrint
+
+runOne :: [String] -> IO ()
+runOne args = do
+    env <- preBindings >>= flip bindVars [("args", List $ map Str $ tail args)]
+    runIOThrows (show <$> eval env (List [Atom "load", Str (head args)])) >>= hPutStrLn stderr
 
 {-
 The parser part
@@ -189,6 +207,7 @@ eval env (List (Atom "lambda" : DottedList params' varargs' : body')) =
     makeVarargs varargs' env params' body'
 eval env (List (Atom "lambda" : varargs'@(Atom _) : body')) =
     makeVarargs varargs' env [] body'
+eval env (List [Atom "load", Str filename]) = load filename >>= fmap last . mapM (eval env)
 eval env (List (func : args)) = do
     f <- eval env func
     a <- mapM (eval env) args
@@ -343,10 +362,58 @@ functions
 -}
 
 preBindings :: IO Env
-preBindings = (>>=) nullEnv $ flip bindVars $ map
-    (\(var, func) -> (var, PreFunc func))
-    primitives
+preBindings =
+    (>>=) nullEnv
+        $  flip bindVars
+        $  map (mf IOFunc)  ioPrimitives
+        ++ map (mf PreFunc) primitives
+    where mf c (v, f) = (v, c f)
 
 makeFunc v e p b = return $ Func (map show p) v b e
 makeNormalFunc = makeFunc Nothing
 makeVarargs = makeFunc . Just . showLisp
+
+{-
+IO
+-}
+
+ioPrimitives :: [(String, [LispVal] -> IOThrowsError LispVal)]
+ioPrimitives =
+    [ ("apply"            , applyProc)
+    , ("open-input-file"  , makePort ReadMode)
+    , ("open-output-file" , makePort WriteMode)
+    , ("close-input-port" , closePort)
+    , ("close-output-port", closePort)
+    , ("read"             , readProc)
+    , ("write"            , writeProc)
+    , ("read-contents"    , readContents)
+    , ("read-all"         , readAll)
+    ]
+
+applyProc :: [LispVal] -> IOThrowsError LispVal
+applyProc [func, List args] = apply func args
+applyProc (func : args) = apply func args
+
+makePort :: IOMode -> [LispVal] -> IOThrowsError LispVal
+makePort mode [Str filename] = Port <$> liftIO (openFile filename mode)
+
+closePort :: [LispVal] -> IOThrowsError LispVal
+closePort [Port port] = liftIO $ hClose port >> return (Boolean True)
+closePort _ = return $ Boolean False
+
+readProc :: [LispVal] -> IOThrowsError LispVal
+readProc [] = readProc [Port stdin]
+readProc [Port port] = liftIO (hGetLine port) >>= liftThrows . readExpr
+
+writeProc :: [LispVal] -> IOThrowsError LispVal
+writeProc [x] = writeProc [x, Port stdout]
+writeProc [x, Port port] = liftIO $ hPrint port x >> return (Boolean True)
+
+readContents :: [LispVal] -> IOThrowsError LispVal
+readContents [Str filename] = Str <$> liftIO (readFile filename)
+
+load :: String -> IOThrowsError [LispVal]
+load filename = liftIO (readFile filename) >>= liftThrows . readExprList
+
+readAll :: [LispVal] -> IOThrowsError LispVal
+readAll [Str n] = List <$> load n
