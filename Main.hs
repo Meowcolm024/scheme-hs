@@ -6,7 +6,7 @@ import           Text.ParserCombinators.Parsec
                                          hiding ( spaces )
 import           Control.Monad.Except
 import           System.IO
-import System.Environment (getArgs)
+import           System.Environment             ( getArgs )
 import           Data.IORef
 import           Data.Maybe                     ( isJust
                                                 , isNothing
@@ -92,9 +92,7 @@ IO part
 main :: IO ()
 main = do
     args <- getArgs
-    if null args
-    then flushStr "Scheme\n" >> runRepl
-    else runOne args
+    if null args then flushStr "Scheme\n" >> runRepl else runOne args
 
 readOrThrow :: Parser a -> String -> ThrowsError a
 readOrThrow parser input = case regularParse parser input of
@@ -130,7 +128,8 @@ runRepl =
 runOne :: [String] -> IO ()
 runOne args = do
     env <- preBindings >>= flip bindVars [("args", List $ map Str $ tail args)]
-    runIOThrows (show <$> eval env (List [Atom "load", Str (head args)])) >>= hPutStrLn stderr
+    runIOThrows (show <$> eval env (List [Atom "load", Str (head args)]))
+        >>= hPutStrLn stderr
 
 {-
 The parser part
@@ -207,7 +206,8 @@ eval env (List (Atom "lambda" : DottedList params' varargs' : body')) =
     makeVarargs varargs' env params' body'
 eval env (List (Atom "lambda" : varargs'@(Atom _) : body')) =
     makeVarargs varargs' env [] body'
-eval env (List [Atom "load", Str filename]) = load filename >>= fmap last . mapM (eval env)
+eval env (List [Atom "load", Str filename]) =
+    load filename >>= fmap last . mapM (eval env)
 eval env (List (func : args)) = do
     f <- eval env func
     a <- mapM (eval env) args
@@ -392,21 +392,21 @@ ioPrimitives =
 
 applyProc :: [LispVal] -> IOThrowsError LispVal
 applyProc [func, List args] = apply func args
-applyProc (func : args) = apply func args
+applyProc (func : args)     = apply func args
 
 makePort :: IOMode -> [LispVal] -> IOThrowsError LispVal
 makePort mode [Str filename] = Port <$> liftIO (openFile filename mode)
 
 closePort :: [LispVal] -> IOThrowsError LispVal
 closePort [Port port] = liftIO $ hClose port >> return (Boolean True)
-closePort _ = return $ Boolean False
+closePort _           = return $ Boolean False
 
 readProc :: [LispVal] -> IOThrowsError LispVal
-readProc [] = readProc [Port stdin]
+readProc []          = readProc [Port stdin]
 readProc [Port port] = liftIO (hGetLine port) >>= liftThrows . readExpr
 
 writeProc :: [LispVal] -> IOThrowsError LispVal
-writeProc [x] = writeProc [x, Port stdout]
+writeProc [x]            = writeProc [x, Port stdout]
 writeProc [x, Port port] = liftIO $ hPrint port x >> return (Boolean True)
 
 readContents :: [LispVal] -> IOThrowsError LispVal
