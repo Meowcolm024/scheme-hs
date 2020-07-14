@@ -1,5 +1,5 @@
 {-# LANGUAGE TupleSections #-}
-{-#LANGUAGE LambdaCase#-}
+{-# LANGUAGE LambdaCase #-}
 module Main where
 
 import           Text.ParserCombinators.Parsec
@@ -29,7 +29,6 @@ data LispError = NumArgs Integer [LispVal]
                | NotFunction String String
                | UnboundVar String String
                | Default String
-               deriving Show
 
 type ThrowsError = Either LispError
 
@@ -49,6 +48,9 @@ instance Eq LispVal where
     Boolean a      == Boolean b      = a == b
     _              == _              = False
 
+instance Show LispError where
+    show = showError
+
 showLisp :: LispVal -> String
 showLisp (Atom x        ) = x
 showLisp (List x        ) = "(" ++ unwordsList x ++ ")"
@@ -59,14 +61,24 @@ showLisp (Boolean x     ) = if x then "#t" else "#f"
 showLisp (PreFunc _     ) = "<primitive>"
 showLisp Func{}           = "<function>"
 
+showError :: LispError -> String
+showError (UnboundVar message varname) = message ++ ": " ++ varname
+showError (BadSpecialForm message form) = message ++ ": " ++ show form
+showError (NotFunction message func ) = message ++ ": " ++ show func
+showError (NumArgs expected found ) = " Expected " ++ show expected ++ " args: found values " ++ unwordsList found
+showError (TypeMismatch expected found) = "Invalid type: expected " ++ expected ++ ", found " ++ show found
+showError (Parser parseErr) = " Parse error at " ++ show parseErr
+showError (Default err) = "Error: " ++ err
+
 unwordsList :: [LispVal] -> String
 unwordsList = unwords . map showLisp
 
+trapError :: (MonadError a m, Show a) => m String -> m String
 trapError a = catchError a (return . show)
 
 extractValue :: ThrowsError a -> a
 extractValue (Right x) = x
-
+extractValue (Left _) = error "How does it even possible?"
 {-
 IO part
 -}
@@ -167,6 +179,8 @@ eval env (List [Atom "set!", Atom var, form]) =
     eval env form >>= setVar env var
 eval env (List [Atom "define", Atom var, form]) =
     eval env form >>= defineVar env var
+eval env (List (Atom "define" : List (Atom var : params') : body')) =
+    makeNormalFunc env params' body' >>= defineVar env var
 eval env (List (Atom "define" : DottedList (Atom var : params') varargs' : body'))
     = makeVarargs varargs' env params' body' >>= defineVar env var
 eval env (List (Atom "lambda" : List params' : body')) =
@@ -295,14 +309,14 @@ isBound envRef var = isJust . lookup var <$> readIORef envRef
 
 getVar :: Env -> String -> IOThrowsError LispVal
 getVar envRef var = (liftIO . readIORef) envRef >>= \env -> maybe
-    (throwError $ UnboundVar "Unbound var: " var)
+    (throwError $ UnboundVar "Unbound var" var)
     (liftIO . readIORef)
     (lookup var env)
 
 setVar :: Env -> String -> LispVal -> IOThrowsError LispVal
 setVar envRef var value = do
     env <- liftIO $ readIORef envRef
-    maybe (throwError $ UnboundVar "Unbound var: " var)
+    maybe (throwError $ UnboundVar "Unbound var" var)
           (liftIO . flip writeIORef value)
           (lookup var env)
     return value
